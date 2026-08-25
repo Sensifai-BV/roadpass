@@ -254,3 +254,68 @@ type Record struct {
 }
 
 // Signature is one organisation's Ed25519 signature over a record hash.
+type Signature struct {
+	KeyID    string    `json:"keyId"`
+	OrgID    string    `json:"orgId"`
+	UserID   string    `json:"userId,omitempty"` // personal signatures: the member who signed
+	Value    []byte    `json:"value"`
+	SignedAt time.Time `json:"signedAt"`
+}
+
+// Receipt is the receiver's signed confirmation of a shipment: when it arrived and
+// what the receiver's weighbridge read. It is signed separately because the sender
+// cannot know it when signing the shipment.
+type Receipt struct {
+	ReceivedAt time.Time `json:"receivedAt"`
+	MassKg     float64   `json:"massKg"`
+	// Decision is the receiver's intake review; empty on receipts signed before
+	// reviews existed (signature format v1).
+	Decision   string    `json:"decision,omitempty"`
+	Note       string    `json:"note,omitempty"`
+	ReceivedBy string    `json:"receivedBy,omitempty"`
+	Signature  Signature `json:"signature"`
+	// ActorSignature: the receiving member's personal signature.
+	ActorSignature *Signature `json:"actorSignature,omitempty"`
+}
+
+// Intake review decisions.
+const (
+	Accepted         = "accepted"
+	AcceptedWithNote = "accepted_with_note"
+	Rejected         = "rejected"
+)
+
+// MaxNote is the longest note a signer or receiver may add.
+const MaxNote = 1000
+
+// HashDoc is exactly what the content hash covers. Server-assigned state (status,
+// seal, signatures, seq) is excluded so it can change without changing the hash.
+type HashDoc struct {
+	ID           string         `json:"id"`
+	Version      int            `json:"version"`
+	PrevHash     string         `json:"prevHash,omitempty"`
+	Type         RecordType     `json:"type"`
+	OrgID        string         `json:"orgId"`
+	SiteID       string         `json:"siteId,omitempty"`
+	Counterparty string         `json:"counterpartyOrgId,omitempty"`
+	Ref          string         `json:"ref"`
+	OccurredAt   string         `json:"occurredAt"`
+	MassKg       float64        `json:"massKg"`
+	Inputs       []Input        `json:"inputs,omitempty"`
+	Data         map[string]any `json:"data"`
+	Provenance   string         `json:"provenance"`
+	// Note is the signer's own remark; omitted when empty so records without one
+	// keep the fingerprint they had before notes existed.
+	Note string `json:"note,omitempty"`
+}
+
+// HashDoc returns the hashable view of r. Times are whole seconds in UTC so a
+// round trip through any store or wire format hashes identically.
+func (r *Record) HashDoc() HashDoc {
+	return HashDoc{
+		ID: r.ID, Version: r.Version, PrevHash: r.PrevHash, Type: r.Type, OrgID: r.OrgID,
+		SiteID: r.SiteID, Counterparty: r.Counterparty, Ref: r.Ref,
+		OccurredAt: r.OccurredAt.UTC().Truncate(time.Second).Format(time.RFC3339),
+		MassKg:     r.MassKg, Inputs: r.Inputs, Data: r.Body, Provenance: r.Provenance, Note: r.Note,
+	}
+}
