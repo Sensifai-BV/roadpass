@@ -35,3 +35,13 @@ func TestInclusionProofEveryLeafEverySize(t *testing.T) {
 }
 
 func TestInclusionProofRejectsBadInput(t *testing.T) {
+	if _, _, err := InclusionProof([]string{HashBytes(nil)}, 1); err == nil {
+		t.Fatal("out-of-range index accepted")
+	}
+	if _, err := MerkleRoot([]string{"zz"}); err == nil {
+		t.Fatal("non-hex leaf accepted")
+	}
+	if VerifyInclusion("zz", nil, "") {
+		t.Fatal("non-hex leaf verified")
+	}
+}
