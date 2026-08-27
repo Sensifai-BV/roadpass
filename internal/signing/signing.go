@@ -178,3 +178,48 @@ func NewVault(master string) (*Vault, error) {
 	block, err := aes.NewCipher(raw)
 	if err != nil {
 		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return &Vault{aead: aead}, nil
+}
+
+// MasterKey decodes SIGNING_MASTER_KEY (32 bytes, hex or base64).
+func MasterKey(master string) ([]byte, error) {
+	master = strings.TrimSpace(master)
+	raw, err := hex.DecodeString(master)
+	if err != nil || len(raw) != 32 {
+		raw, err = base64.StdEncoding.DecodeString(master)
+	}
+	if err != nil || len(raw) != 32 {
+		return nil, errors.New("SIGNING_MASTER_KEY must be 32 bytes, hex or base64")
+	}
+	return raw, nil
+}
+
+// Seal encrypts the key's seed: nonce || ciphertext.
+func (v *Vault) Seal(k *Key) ([]byte, error) {
+	if !k.CanSign() {
+		return nil, fmt.Errorf("key %s: nothing to seal", k.ID)
+	}
+	nonce := make([]byte, v.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return v.aead.Seal(nonce, nonce, k.private.Seed(), []byte(k.ID)), nil
+}
+
+// Open decrypts a sealed seed and returns the full key.
+func (v *Vault) Open(id, orgID string, sealed []byte) (*Key, error) {
+	ns := v.aead.NonceSize()
+	if len(sealed) < ns {
+		return nil, errors.New("sealed key too short")
+	}
+	seed, err := v.aead.Open(nil, sealed[:ns], sealed[ns:], []byte(id))
+	if err != nil {
+		return nil, fmt.Errorf("key %s: cannot decrypt (wrong master key or moved ciphertext): %w", id, err)
+	}
+	return KeyFromSeed(id, orgID, seed), nil
+}
