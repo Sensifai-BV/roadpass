@@ -251,3 +251,67 @@ func (k *Keyring) Rotate(ctx context.Context, orgID, userID string) (store.Signi
 			return store.SigningKey{}, err
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.SigningKey{}, err
+	}
+	k.forget(holder(orgID, userID))
+	return k.Create(ctx, orgID, userID)
+}
+
+// Revoke ends a member's active key (they left, or the key may be compromised).
+func (k *Keyring) Revoke(ctx context.Context, orgID, userID, reason string) error {
+	cur, err := k.St.ActiveKey(ctx, orgID, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	k.forget(holder(orgID, userID))
+	return k.St.EndKey(ctx, cur.ID, "revoked", reason)
+}
+
+// RevokeOrg revokes an organisation's company key and every member's personal
+// key (suspension). The worker records the revocations on the ledger.
+func (k *Keyring) RevokeOrg(ctx context.Context, orgID, reason string) error {
+	_, err := k.St.DB.Exec(ctx, `UPDATE signing_keys SET status='revoked', revoke_reason=$2, revoked_at=now()
+		WHERE org_id=$1 AND status='active'`, orgID, reason)
+	k.mu.Lock()
+	k.cache = nil
+	k.mu.Unlock()
+	return err
+}
+
+// EnsureOrgKey issues a company key if the organisation has no usable one
+// (first verification, or reactivation after a suspension revoked it).
+func (k *Keyring) EnsureOrgKey(ctx context.Context, orgID string) error {
+	if _, err := k.St.ActiveKey(ctx, orgID, ""); !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	_, err := k.Create(ctx, orgID, "")
+	return err
+}
+
+func (k *Keyring) forget(h string) {
+	k.mu.Lock()
+	delete(k.cache, h)
+	k.mu.Unlock()
+}
+
+// Health reports the vault's state ("" when no vault is configured).
+func (k *Keyring) Health(ctx context.Context) error {
+	if k.Transit == nil {
+		return nil
+	}
+	return k.Transit.Health(ctx)
+}
+
+// Custody describes where new keys are created, for status pages.
+func (k *Keyring) Custody() string {
+	if k.Transit != nil {
+		return "vault"
+	}
+	return "platform"
+}
+
+// IsPersonal reports whether a key id names a member's personal key.
+func IsPersonal(keyID string) bool { return strings.HasPrefix(keyID, "usr_") }
