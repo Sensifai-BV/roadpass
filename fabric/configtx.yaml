@@ -1,0 +1,100 @@
+# ROADPASS channel configuration: 1 Raft orderer, 2 peer orgs, 2 channels.
+#   roadpass : Sensifai + Plasmix  (the ROADPASS proof ledger)
+#   sandbox  : Sensifai only       (second tenant — used by the tenant-separation test)
+Organizations:
+  - &OrdererOrg
+    Name: OrdererOrg
+    ID: OrdererMSP
+    MSPDir: crypto/ordererOrganizations/roadpass.local/msp
+    Policies:
+      Readers: {Type: Signature, Rule: "OR('OrdererMSP.member')"}
+      Writers: {Type: Signature, Rule: "OR('OrdererMSP.member')"}
+      Admins:  {Type: Signature, Rule: "OR('OrdererMSP.admin')"}
+    OrdererEndpoints: [127.0.0.1:7050]
+  - &Sensifai
+    Name: SensifaiMSP
+    ID: SensifaiMSP
+    MSPDir: crypto/peerOrganizations/sensifai.roadpass.local/msp
+    Policies:
+      Readers:     {Type: Signature, Rule: "OR('SensifaiMSP.admin', 'SensifaiMSP.peer', 'SensifaiMSP.client')"}
+      Writers:     {Type: Signature, Rule: "OR('SensifaiMSP.admin', 'SensifaiMSP.client')"}
+      Admins:      {Type: Signature, Rule: "OR('SensifaiMSP.admin')"}
+      Endorsement: {Type: Signature, Rule: "OR('SensifaiMSP.peer')"}
+    AnchorPeers: [{Host: 127.0.0.1, Port: 7051}]
+  - &Plasmix
+    Name: PlasmixMSP
+    ID: PlasmixMSP
+    MSPDir: crypto/peerOrganizations/plasmix.roadpass.local/msp
+    Policies:
+      Readers:     {Type: Signature, Rule: "OR('PlasmixMSP.admin', 'PlasmixMSP.peer', 'PlasmixMSP.client')"}
+      Writers:     {Type: Signature, Rule: "OR('PlasmixMSP.admin', 'PlasmixMSP.client')"}
+      Admins:      {Type: Signature, Rule: "OR('PlasmixMSP.admin')"}
+      Endorsement: {Type: Signature, Rule: "OR('PlasmixMSP.peer')"}
+    AnchorPeers: [{Host: 127.0.0.1, Port: 9051}]
+
+Capabilities:
+  Channel: &ChannelCapabilities {V2_0: true}
+  Orderer: &OrdererCapabilities {V2_0: true}
+  Application: &ApplicationCapabilities {V2_5: true}
+
+# Membership changes (onboarding) need a majority of member-org admins. Chaincode lifecycle and the
+# default endorsement policy are pinned per profile to the orgs that run peers: actor orgs onboarded
+# later (network.sh onboard) are client-only, and must not raise a MAJORITY they can never endorse.
+Application: &ApplicationDefaults
+  Organizations:
+  Policies: &AppPolicies
+    Readers: {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers: {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:  {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+  Capabilities: *ApplicationCapabilities
+
+Orderer: &OrdererDefaults
+  OrdererType: etcdraft
+  BatchTimeout: 500ms
+  BatchSize: {MaxMessageCount: 50, AbsoluteMaxBytes: 99 MB, PreferredMaxBytes: 2 MB}
+  Organizations:
+  Policies:
+    Readers:         {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers:         {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:          {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+    BlockValidation: {Type: ImplicitMeta, Rule: "ANY Writers"}
+  EtcdRaft:
+    Consenters:
+      - Host: 127.0.0.1
+        Port: 7050
+        ClientTLSCert: crypto/ordererOrganizations/roadpass.local/orderers/orderer.roadpass.local/tls/server.crt
+        ServerTLSCert: crypto/ordererOrganizations/roadpass.local/orderers/orderer.roadpass.local/tls/server.crt
+  Capabilities: *OrdererCapabilities
+
+Channel: &ChannelDefaults
+  Policies:
+    Readers: {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers: {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:  {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+  Capabilities: *ChannelCapabilities
+
+Profiles:
+  RoadpassChannel:
+    <<: *ChannelDefaults
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations: [*OrdererOrg]
+    Application:
+      <<: *ApplicationDefaults
+      Organizations: [*Sensifai, *Plasmix]
+      Policies:
+        <<: *AppPolicies
+        LifecycleEndorsement: {Type: Signature, Rule: "AND('SensifaiMSP.peer', 'PlasmixMSP.peer')"}
+        Endorsement:          {Type: Signature, Rule: "AND('SensifaiMSP.peer', 'PlasmixMSP.peer')"}
+  SandboxChannel:
+    <<: *ChannelDefaults
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations: [*OrdererOrg]
+    Application:
+      <<: *ApplicationDefaults
+      Organizations: [*Sensifai]
+      Policies:
+        <<: *AppPolicies
+        LifecycleEndorsement: {Type: Signature, Rule: "OR('SensifaiMSP.peer')"}
+        Endorsement:          {Type: Signature, Rule: "OR('SensifaiMSP.peer')"}
