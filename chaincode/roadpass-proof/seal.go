@@ -200,3 +200,54 @@ func (c *ProofContract) RegisterSigner(ctx contractapi.TransactionContextInterfa
 	ts, err := txTime(ctx)
 	if err != nil {
 		return nil, err
+	}
+	s := &Signer{
+		DocType: "signer", KeyID: in.KeyID, OrgID: in.OrgID, OrgName: in.OrgName, HolderID: in.HolderID, Algorithm: in.Algorithm,
+		PublicKey: in.PublicKey, Status: "active", RegisteredAt: ts, TxID: ctx.GetStub().GetTxID(),
+	}
+	return s, putJSON(ctx, key, s)
+}
+
+// RevokeSigner marks a key revoked. Signatures made before RevokedAt stay valid.
+func (c *ProofContract) RevokeSigner(ctx contractapi.TransactionContextInterface, keyID, reason string) (*Signer, error) {
+	who, err := submitter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireOperator(who); err != nil {
+		return nil, err
+	}
+	s, err := c.GetSigner(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+	if s.Status == "revoked" {
+		return nil, fmt.Errorf("signer %s is already revoked", keyID)
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, fmt.Errorf("a revocation reason is required")
+	}
+	ts, err := txTime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.Status, s.RevokeReason, s.RevokedAt = "revoked", reason, ts
+	k, err := ctx.GetStub().CreateCompositeKey(keySigner, []string{keyID})
+	if err != nil {
+		return nil, err
+	}
+	return s, putJSON(ctx, k, s)
+}
+
+// GetSigner returns one registered signing key.
+func (c *ProofContract) GetSigner(ctx contractapi.TransactionContextInterface, keyID string) (*Signer, error) {
+	k, err := ctx.GetStub().CreateCompositeKey(keySigner, []string{keyID})
+	if err != nil {
+		return nil, err
+	}
+	var s Signer
+	if ok, err := getJSON(ctx, k, &s); err != nil || !ok {
+		return nil, notFound("signer", keyID, err)
+	}
+	return &s, nil
+}
