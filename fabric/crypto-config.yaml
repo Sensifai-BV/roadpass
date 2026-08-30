@@ -1,0 +1,27 @@
+# ROADPASS demo network identities (cryptogen). Local/dev only — use Fabric CA in production.
+OrdererOrgs:
+  - Name: Orderer
+    Domain: roadpass.local
+    EnableNodeOUs: true
+    Specs:
+      - Hostname: orderer
+        SANS: [127.0.0.1, localhost, orderer, orderer.roadpass.local, fabric, dashboard]
+PeerOrgs:
+  # Operator: runs the assurance module, anchors import batches and evidence packages
+  - Name: Sensifai
+    Domain: sensifai.roadpass.local
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+      SANS: [127.0.0.1, localhost, peer0.sensifai.roadpass.local, fabric, dashboard]
+    Users:
+      Count: 1
+  # Value-chain actor (PLASMIX ROAD role, synthetic identity): may anchor/correct its own records, read proofs
+  - Name: Plasmix
+    Domain: plasmix.roadpass.local
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+      SANS: [127.0.0.1, localhost, peer0.plasmix.roadpass.local, fabric, dashboard]
+    Users:
+      Count: 1
