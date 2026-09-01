@@ -1,0 +1,53 @@
+# Local data services for development and E2E (OrbStack or any Docker engine).
+#   docker compose -f deploy/compose.infra.yml up -d
+# Ports avoid the defaults because other projects on this machine use them.
+name: roadpass-infra
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: roadpass
+      POSTGRES_USER: roadpass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-roadpass}
+    command: ["postgres", "-c", "shared_buffers=512MB", "-c", "work_mem=32MB", "-c", "maintenance_work_mem=256MB",
+              "-c", "max_wal_size=4GB", "-c", "synchronous_commit=off"]
+    ports: ["127.0.0.1:15433:5432"]
+    volumes: [pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roadpass -d roadpass"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.9
+    environment:
+      CLICKHOUSE_DB: roadpass
+      CLICKHOUSE_USER: roadpass
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-roadpass}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    ports: ["127.0.0.1:19100:9000", "127.0.0.1:18223:8123"]
+    volumes: [ch:/var/lib/clickhouse]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    ports: ["127.0.0.1:16379:6379"]
+    volumes: [redis:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pg:
+  ch:
+  redis:
