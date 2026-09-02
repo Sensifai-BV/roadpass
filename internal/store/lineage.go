@@ -182,3 +182,49 @@ func (s *Store) ShipmentsOf(ctx context.Context, itemIDs []string) (map[string][
 	var edges []edge
 	var shipIDs []string
 	for rows.Next() {
+		var e edge
+		if err := rows.Scan(&e.item, &e.ship, &e.kg); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		edges = append(edges, e)
+		shipIDs = append(shipIDs, e.ship)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ships, err := s.RecordsByID(ctx, shipIDs)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]domain.Record, len(ships))
+	for _, r := range ships {
+		byID[r.ID] = r
+	}
+	out := map[string][]ShipItem{}
+	for _, e := range edges {
+		if r, ok := byID[e.ship]; ok {
+			out[e.item] = append(out[e.item], ShipItem{r, e.kg})
+		}
+	}
+	return out, nil
+}
+
+// LaidOn returns the delivery links laid on a road section.
+func (s *Store) LaidOn(ctx context.Context, sectionID string) ([]domain.Link, error) {
+	rows, err := s.DB.Query(ctx, `SELECT parent_id, child_id, kind, mass_kg FROM links WHERE kind='laid' AND child_id=$1`, sectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Link
+	for rows.Next() {
+		var l domain.Link
+		if err := rows.Scan(&l.Parent, &l.Child, &l.Kind, &l.MassKg); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
