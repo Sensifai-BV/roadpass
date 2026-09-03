@@ -416,3 +416,108 @@ func filterSQL(v Viewer, f Filter) ([]string, []any) {
 	}
 	return where, args
 }
+
+// Records lists latest versions, newest first, with keyset pagination.
+func (s *Store) Records(ctx context.Context, v Viewer, f Filter) ([]domain.Record, *Cursor, error) {
+	where, args := filterSQL(v, f)
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	args = append(args, limit+1)
+	q := fmt.Sprintf(`SELECT %s FROM records WHERE %s ORDER BY occurred_at DESC, id DESC LIMIT $%d`, recCols, strings.Join(where, " AND "), len(args))
+	rows, err := s.DB.Query(ctx, q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := collect(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	var next *Cursor
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = &Cursor{At: last.OccurredAt, ID: last.ID}
+	}
+	return out, next, nil
+}
+
+// SetStatus updates the status of a record's latest version.
+func (s *Store) SetStatus(ctx context.Context, id string, st domain.Status) error {
+	if _, err := s.DB.Exec(ctx, `UPDATE records SET status=$2 WHERE id=$1 AND latest`, id, string(st)); err != nil {
+		return err
+	}
+	_, err := s.DB.Exec(ctx, `INSERT INTO reproject(id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET queued_at = now()`, id)
+	return err
+}
+
+// FinalizeLatest marks the newest version of every record latest (after CopyRecords).
+func (s *Store) FinalizeLatest(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx, `UPDATE records r SET latest = true FROM (
+			SELECT id, max(version) AS v FROM records GROUP BY id) m
+		WHERE r.id = m.id AND r.version = m.v AND NOT r.latest`)
+	return err
+}
+
+// SetReceipt stores the receiver's signed receipt of a shipment, once.
+func (s *Store) SetReceipt(ctx context.Context, id string, rc domain.Receipt) error {
+	ak, as, _ := sigParts(rc.ActorSignature)
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tag, err := tx.Exec(ctx, `UPDATE records SET received_at=$2, received_mass_kg=$3, rcpt_key_id=$4, rcpt_signature=$5,
+			rcpt_decision=$6, rcpt_note=$7, received_by=$8, rcpt_actor_key_id=$9, rcpt_actor_signature=$10
+		WHERE id=$1 AND latest AND type IN ('shipment','delivery') AND received_at IS NULL`,
+		id, rc.ReceivedAt, rc.MassKg, rc.Signature.KeyID, rc.Signature.Value, nullIf(rc.Decision), rc.Note, nullIf(rc.ReceivedBy), ak, as)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s is not an open shipment", ErrConflict, id)
+	}
+	// The receipt changes what the record counts for in the projection (a
+	// rejected delivery was not laid), but writes no new version: queue it.
+	if _, err := tx.Exec(ctx, `INSERT INTO reproject(id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET queued_at = now()`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RecordsAfter returns record versions with seq > after, in seq order (projector).
+func (s *Store) RecordsAfter(ctx context.Context, after int64, limit int) ([]domain.Record, error) {
+	rows, err := s.DB.Query(ctx, `SELECT `+recCols+` FROM records WHERE seq > $1 ORDER BY seq LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	return collect(rows)
+}
+
+// MaxSeq is the newest record sequence number.
+func (s *Store) MaxSeq(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.DB.QueryRow(ctx, `SELECT COALESCE(max(seq),0) FROM records`).Scan(&n)
+	return n, err
+}
+
+// NextID allocates the next human id for a prefix and year, e.g. ASL-25-004214.
+func NextID(ctx context.Context, q Querier, prefix string, year int) (string, error) {
+	key := fmt.Sprintf("%s-%02d", prefix, year%100)
+	var n int64
+	err := q.QueryRow(ctx, `INSERT INTO id_counters(key, n) VALUES ($1, 1)
+		ON CONFLICT (key) DO UPDATE SET n = id_counters.n + 1 RETURNING n`, key).Scan(&n)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%06d", key, n), nil
+}
+
+// SyncCounters moves id counters past every existing id (after a bulk load).
+func (s *Store) SyncCounters(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO id_counters(key, n)
+		SELECT left(id, 6), max(substring(id from 8)::bigint) FROM records WHERE id ~ '^[A-Z]{3}-[0-9]{2}-[0-9]+$' GROUP BY 1
+		ON CONFLICT (key) DO UPDATE SET n = GREATEST(id_counters.n, EXCLUDED.n)`)
+	return err
+}
