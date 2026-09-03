@@ -128,3 +128,36 @@ func (v Viewer) All() bool { return v.System || v.Oversight }
 func isUnique(err error) bool {
 	var pg *pgconn.PgError
 	return errors.As(err, &pg) && pg.Code == "23505"
+}
+
+func isForeignKey(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "23503"
+}
+
+func notFound(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}
+
+// placeholders builds "$a,$b,…" for n args starting at from.
+func placeholders(from, n int) string {
+	var b strings.Builder
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "$%d", from+i)
+	}
+	return b.String()
+}
+
+// Querier is satisfied by the pool and by a transaction, so repository helpers
+// can run inside a caller's transaction.
+type Querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
