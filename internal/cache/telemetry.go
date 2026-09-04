@@ -68,3 +68,21 @@ func (c *Cache) NextTelemetry(ctx context.Context, consumer string, block, stale
 		add(claimed)
 		return b, nil
 	}
+	res, err := c.R.XReadGroup(ctx, &redis.XReadGroupArgs{Group: GroupTelemetry, Consumer: consumer,
+		Streams: []string{StreamTelemetry, ">"}, Count: count, Block: block}).Result()
+	if errors.Is(err, redis.Nil) || errors.Is(err, context.Canceled) {
+		return b, nil
+	}
+	if err != nil {
+		return b, err
+	}
+	for _, s := range res {
+		add(s.Messages)
+	}
+	return b, nil
+}
+
+// AckTelemetry acknowledges inserted messages.
+func (c *Cache) AckTelemetry(ctx context.Context, ids ...string) error {
+	return c.R.XAck(ctx, StreamTelemetry, GroupTelemetry, ids...).Err()
+}
