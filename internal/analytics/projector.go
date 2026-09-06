@@ -219,3 +219,59 @@ func (p *Projector) fact(ctx context.Context, r *domain.Record) ([]any, error) {
 	}
 	b := r.Body
 	switch r.Type {
+	case domain.TypeRejectLot:
+		route = domain.Str(b, "avoided_route")
+	case domain.TypeAsphaltLot:
+		mix, process = domain.Str(b, "mix"), domain.Str(b, "process")
+		dosage, temp = float32(domain.Num(b, "dosage_pct_mix")), float32(domain.Num(b, "mixing_temp_c"))
+	case domain.TypeDelivery:
+		section = domain.Str(b, "section_id")
+		owner = p.owner(ctx, section)
+		temp, dist = float32(domain.Num(b, "arrival_temp_c")), float32(domain.Num(b, "distance_km"))
+	case domain.TypeShipment:
+		dist = float32(domain.Num(b, "distance_km"))
+	case domain.TypeRoadSection:
+		section, owner = r.ID, domain.Str(b, "owner_org_id")
+		p.owners[r.ID] = owner
+		mix, layer, road = domain.Str(b, "mix"), domain.Str(b, "layer"), domain.Str(b, "road")
+		lat, lon = float32(domain.Num(b, "lat")), float32(domain.Num(b, "lon"))
+		length = float32(domain.Num(b, "km_to") - domain.Num(b, "km_from"))
+		area = domain.Num(b, "area_m2")
+		if rg := domain.Str(b, "region"); rg != "" {
+			region = rg
+		}
+	case domain.TypeLabTest:
+		parent, test, testValue = domain.Str(b, "subject_id"), domain.Str(b, "test"), domain.Num(b, "value")
+		if domain.Str(b, "result") == "pass" {
+			testPass = 1
+		}
+	case domain.TypeAcceptance:
+		parent = domain.Str(b, "subject_id")
+	}
+	if s, ok := p.sites[r.SiteID]; ok && lat == 0 {
+		lat, lon = float32(s.Lat), float32(s.Lon)
+	}
+	var res lca.Result
+	massKg := r.MassKg
+	status := string(r.Status)
+	if status == "" {
+		status = string(domain.StatusOK)
+	}
+	switch {
+	case r.Type == domain.TypeLabTest || r.Type == domain.TypeAcceptance:
+	case !r.CountsMass():
+		// Void, or a delivery rejected at the paver: nothing reached the road, so
+		// it adds no asphalt, plastic, avoided CO₂e or footprint to the KPIs.
+		massKg = 0
+	default:
+		it, err := p.rv.Of(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		res = lca.Summarise(r, map[string]lca.Intensity{r.ID: it}, p.sc)
+	}
+	return []any{uint64(r.Seq), r.ID, uint32(r.Version), string(r.Type), r.OrgID, string(o.Kind), r.SiteID, region,
+		r.Counterparty, parent, section, owner, r.OccurredAt.UTC(), massKg, res.RecycledKg, res.RejectKg, res.AvoidedKg,
+		res.VirginKg, res.FootprintKg, res.ChainFootKg, res.TransportTkm, mix, process, layer, road, test, testValue, testPass,
+		dosage, temp, dist, lat, lon, length, area, r.Provenance, route, status}, nil
+}
