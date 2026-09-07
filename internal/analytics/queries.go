@@ -427,3 +427,111 @@ type LineHealth struct {
 	OrgID   string  `ch:"org_id" json:"orgId"`
 	Line    string  `ch:"line" json:"line"`
 	Hours   uint64  `ch:"hours" json:"hours"`
+	Samples uint64  `ch:"samples" json:"samples"`
+	Stopped uint64  `ch:"stopped" json:"stopped"`
+	Suspect uint64  `ch:"suspect" json:"suspect"`
+	OutputT float64 `ch:"output" json:"outputTonnes"`
+}
+
+// Lines returns per-line health: run hours, stops and suspect readings. Output
+// integrates each hour's mean throughput over that hour, so it does not depend on
+// how often the plant samples; a plant that sends every minute and one that sends
+// hourly report the same tonnes.
+func (d *DB) Lines(ctx context.Context, s Scope, r Range) ([]LineHealth, error) {
+	w, wa := s.orgOnly()
+	var out []LineHealth
+	err := d.C.Select(ctx, &out, `SELECT site_id, org_id, line, countIf(n > st) AS hours, sum(n) AS samples,
+			sum(st) AS stopped, sum(sp) AS suspect, sum(avg_thr) / 1000 AS output
+		FROM (SELECT site_id, org_id, line, hour, sum(samples) AS n, sum(stopped) AS st, sum(suspect) AS sp,
+				sum(thr_sum) / greatest(1, sum(samples)) AS avg_thr
+			FROM extruder_hourly WHERE `+w+` AND hour >= ? AND hour < ? GROUP BY site_id, org_id, line, hour)
+		GROUP BY site_id, org_id, line ORDER BY site_id, line
+		SETTINGS prefer_column_name_to_alias = 1`,
+		append(wa, r.args()...)...)
+	if err != nil || len(out) == 0 {
+		return out, err
+	}
+	// A stopped line reads zero melt and pressure; that is a stop, not a suspect reading.
+	// The hourly roll-up cannot tell them apart, so count the suspects from the readings
+	// themselves, the same rule as the "Readings to check" list.
+	var sus []struct {
+		SiteID string `ch:"site_id"`
+		Line   string `ch:"line"`
+		N      uint64 `ch:"n"`
+	}
+	if err := d.C.Select(ctx, &sus, `SELECT site_id, line, count() AS n FROM extruder_readings
+		WHERE `+w+` AND ts >= ? AND ts < ? AND throughput_kg_h > 0 AND (melt_c > 400 OR melt_c < 50 OR pressure_bar < 10)
+		GROUP BY site_id, line`, append(wa, r.args()...)...); err != nil {
+		return nil, err
+	}
+	n := map[[2]string]uint64{}
+	for _, x := range sus {
+		n[[2]string{x.SiteID, x.Line}] = x.N
+	}
+	for i := range out {
+		out[i].Suspect = n[[2]string{out[i].SiteID, out[i].Line}]
+	}
+	return out, nil
+}
+
+// Suspect is one raw reading that fails a physical plausibility test.
+type Suspect struct {
+	TS       time.Time `ch:"ts" json:"ts"`
+	SiteID   string    `ch:"site_id" json:"siteId"`
+	Line     string    `ch:"line" json:"line"`
+	LotID    string    `ch:"lot_id" json:"lotId"`
+	MeltC    float32   `ch:"melt_c" json:"meltC"`
+	Pressure float32   `ch:"pressure_bar" json:"pressureBar"`
+	Reason   string    `ch:"reason" json:"reason"`
+}
+
+// Suspects returns the newest implausible extruder readings, ranked so the most
+// likely scaling errors (×10, ÷100) come first.
+func (d *DB) Suspects(ctx context.Context, s Scope, r Range, limit int) ([]Suspect, error) {
+	w, wa := s.orgOnly()
+	var out []Suspect
+	err := d.C.Select(ctx, &out, `SELECT ts, site_id, line, lot_id, melt_c, pressure_bar,
+			multiIf(melt_c > 1000, 'Melt temperature ×10 (unit or scaling error)', melt_c > 400, 'Melt temperature above physical range',
+				pressure_bar < 10, 'Pressure ÷100 (scaling error)', 'Out of range') AS reason
+		FROM extruder_readings WHERE `+w+` AND ts >= ? AND ts < ? AND (melt_c > 400 OR melt_c < 50 OR pressure_bar < 10)
+		AND throughput_kg_h > 0 ORDER BY ts DESC LIMIT ?`, append(append(wa, r.args()...), limit)...)
+	return out, err
+}
+
+// Count returns the number of rows in a table (ops, status page).
+func (d *DB) Count(ctx context.Context, table string) (uint64, error) {
+	if !slices.Contains([]string{"records", "mixer_cycles", "extruder_readings"}, table) {
+		return 0, fmt.Errorf("unknown table %q", table)
+	}
+	var n uint64
+	err := d.C.QueryRow(ctx, "SELECT count() FROM "+table).Scan(&n)
+	return n, err
+}
+
+// GRETARow is one finished road section for the LCA export.
+type GRETARow struct {
+	ID         string    `ch:"id"`
+	Road       string    `ch:"road"`
+	Region     string    `ch:"region"`
+	Layer      string    `ch:"layer"`
+	At         time.Time `ch:"occurred_at"`
+	MassKg     float64   `ch:"mass_kg"`
+	RecycledKg float64   `ch:"recycled_kg"`
+	RejectKg   float64   `ch:"reject_kg"`
+	AvoidedKg  float64   `ch:"avoided_kg"`
+	VirginKg   float64   `ch:"virgin_kg"`
+	ChainKg    float64   `ch:"chain_kg"`
+	Tkm        float64   `ch:"tkm"`
+	Provenance string    `ch:"provenance"`
+}
+
+// GRETARows returns finished road sections (version ≥ 2 carries completed_at).
+func (d *DB) GRETARows(ctx context.Context, s Scope, r Range) ([]GRETARow, error) {
+	w, wa := s.where()
+	var out []GRETARow
+	err := d.C.Select(ctx, &out, `SELECT id, road, region, layer, occurred_at, mass_kg, recycled_kg, reject_kg, avoided_kg, virgin_kg,
+			chain_kg, tkm, provenance
+		FROM `+final+` WHERE type='road_section' AND version >= 2 AND `+w+` AND occurred_at >= ? AND occurred_at < ?
+		ORDER BY occurred_at`, append(wa, r.args()...)...)
+	return out, err
+}
