@@ -546,3 +546,140 @@ func (s *Service) Receipt(ctx context.Context, org domain.Org, actor Actor, duti
 	// Shipments are confirmed at the receiver's weighbridge; asphalt deliveries
 	// by the contractor at the paver (mix, temperature, ticket).
 	if (r.Type != domain.TypeShipment && r.Type != domain.TypeDelivery) || r.Counterparty != org.ID {
+		return domain.Receipt{}, store.ErrForbidden
+	}
+	if r.Void() {
+		return domain.Receipt{}, fmt.Errorf("%w: %s was voided by the sender", ErrReview, shipmentID)
+	}
+	at, massKg := in.ReceivedAt, in.MassKg
+	if at.Before(r.OccurredAt) {
+		return domain.Receipt{}, fmt.Errorf("%w: received before it was sent", ErrReview)
+	}
+	orgKey, personKey, err := s.signers(ctx, org.ID, actor)
+	if err != nil {
+		return domain.Receipt{}, err
+	}
+	at = at.UTC().Truncate(time.Second)
+	facts := signing.ReceiptFacts{ReceivedAt: at, MassKg: massKg, Decision: in.Decision, Note: in.Note}
+	sig, err := signing.SignReceiptWith(ctx, orgKey, r.ContentHash, facts)
+	if err != nil {
+		return domain.Receipt{}, err
+	}
+	rc := domain.Receipt{ReceivedAt: at, MassKg: massKg, Decision: in.Decision, Note: in.Note, ReceivedBy: actor.ID,
+		Signature: domain.Signature{KeyID: orgKey.KeyID(), OrgID: org.ID, Value: sig, SignedAt: at}}
+	if personKey != nil {
+		psig, err := signing.SignReceiptWith(ctx, personKey, r.ContentHash, facts)
+		if err != nil {
+			return domain.Receipt{}, fmt.Errorf("personal signature: %w", err)
+		}
+		rc.ActorSignature = &domain.Signature{KeyID: personKey.KeyID(), OrgID: org.ID, UserID: actor.UserID, Value: psig, SignedAt: at}
+	}
+	if err := s.St.SetReceipt(ctx, shipmentID, rc); err != nil {
+		return domain.Receipt{}, err
+	}
+	if r.Type == domain.TypeDelivery && rc.Decision == domain.Rejected {
+		// A load rejected at the paver was not laid: the plant corrects or voids its ticket.
+		if err := s.St.RaiseFinding(ctx, store.Finding{RecordID: r.ID, Code: "C4", Severity: "blocker", OrgID: r.OrgID,
+			Message: "Load rejected at the paver: " + rc.Note,
+			Fix:     "Void the delivery (the load was not laid on the section), or agree with the contractor and have it accepted."}); err != nil {
+			return domain.Receipt{}, err
+		}
+		// The section it was meant for may now claim more than was laid on it.
+		if err := s.recheckLaid(ctx, domain.Str(r.Body, "section_id")); err != nil {
+			return domain.Receipt{}, err
+		}
+	}
+	if s.Cache != nil {
+		s.Cache.Publish(context.WithoutCancel(ctx), cache.Event{Kind: "records", Orgs: []string{org.ID, r.OrgID}, Count: 1, Ref: shipmentID})
+	}
+	return rc, nil
+}
+
+// recheckLaid re-judges a completed road section's as-laid mass after a
+// delivery onto it stopped counting (checks.AsLaid).
+func (s *Service) recheckLaid(ctx context.Context, sectionID string) error {
+	if sectionID == "" {
+		return nil
+	}
+	env := &dbEnv{q: s.St.DB}
+	sec, ok, err := env.Record(ctx, sectionID)
+	if err != nil || !ok || sec.Type != domain.TypeRoadSection || domain.Str(sec.Body, "completed_at") == "" {
+		return err
+	}
+	laid, err := env.LaidKg(ctx, sectionID)
+	if err != nil {
+		return err
+	}
+	f, bad := checks.AsLaid(sec, laid)
+	if !bad {
+		return nil
+	}
+	return s.St.RaiseFinding(ctx, store.Finding{RecordID: f.RecordID, Code: f.Code, Severity: f.Severity, Message: f.Message,
+		Fix: f.Fix, Detail: f.Detail, OrgID: sec.OrgID})
+}
+
+// VoidIn is the issuer's request to void a record.
+type VoidIn struct {
+	Reason string `json:"reason"`
+}
+
+// VoidInput builds the void version of a record for Process: the latest version's
+// content with no mass, nothing taken from its inputs, and the void flag and
+// reason in the body (so they are signed and sealed). Only the issuing company may
+// void, and only a record nothing else builds on: a lot used or shipped onwards,
+// or a load the receiver took, is corrected instead.
+func (s *Service) VoidInput(ctx context.Context, org domain.Org, id string, in VoidIn) (Input, error) {
+	in.Reason = strings.TrimSpace(in.Reason)
+	switch {
+	case in.Reason == "":
+		return Input{}, fmt.Errorf("%w: say why the record is void", ErrReview)
+	case len([]rune(in.Reason)) > 500:
+		return Input{}, fmt.Errorf("%w: keep the reason under 500 characters", ErrReview)
+	}
+	r, err := s.St.RecordAny(ctx, id)
+	if err != nil {
+		return Input{}, err
+	}
+	if r.OrgID != org.ID {
+		return Input{}, store.ErrForbidden
+	}
+	if r.Void() {
+		return Input{}, fmt.Errorf("%w: %s is already void", ErrReview, id)
+	}
+	if rc := r.Receipt; rc != nil && rc.Decision != domain.Rejected {
+		return Input{}, fmt.Errorf("%w: %s was taken by the receiver on %s; correct it instead", ErrReview, id, rc.ReceivedAt.Format("2 Jan 2006"))
+	}
+	var users []string
+	rows, err := s.St.DB.Query(ctx, `SELECT DISTINCT l.child_id FROM links l JOIN records c ON c.id = l.child_id AND c.latest
+		WHERE l.parent_id=$1 AND l.kind IN ('input','shipped','delivered') AND c.body->'void' IS NULL
+		ORDER BY 1 LIMIT 5`, id)
+	if err != nil {
+		return Input{}, err
+	}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			rows.Close()
+			return Input{}, err
+		}
+		users = append(users, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Input{}, err
+	}
+	if len(users) > 0 {
+		return Input{}, fmt.Errorf("%w: %s is used by %s; void or correct those first", ErrReview, id, strings.Join(users, ", "))
+	}
+	data := make(map[string]any, len(r.Body)+2)
+	for k, v := range r.Body {
+		data[k] = v
+	}
+	data[domain.FieldVoid], data[domain.FieldVoidReason] = true, in.Reason
+	var inputs []domain.Input
+	for _, x := range r.Inputs {
+		inputs = append(inputs, domain.Input{ID: x.ID})
+	}
+	return Input{ID: r.ID, Type: string(r.Type), Ref: r.Ref, SiteID: r.SiteID, OccurredAt: r.OccurredAt, Inputs: inputs,
+		Data: data, Provenance: r.Provenance, Note: in.Reason}, nil
+}
