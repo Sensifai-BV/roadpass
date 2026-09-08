@@ -464,3 +464,120 @@ func ranges(r *domain.Record, inputs []*domain.Record, add addFn) {
 			check("mixing_temp_c", v, window{lo, hi, domain.Str(r.Body, "process") + " mix temperature"})
 		}
 	}
+	if r.Type == domain.TypeRoadSection {
+		// Compacted asphalt weighs about 2.4 t/m³ (2.3–2.5 for dense mixes), so a
+		// section's mass should be close to area × thickness × 2.4. A third off
+		// usually means a typo in area, thickness or mass, or loads missing.
+		area, thick := domain.Num(r.Body, "area_m2"), domain.Num(r.Body, "thickness_cm")
+		if area > 0 && thick > 0 && r.MassKg > 0 {
+			want := area * thick / 100 * 2400
+			if ratio := r.MassKg / want; ratio < 0.67 || ratio > 1.5 {
+				what := "planned"
+				if domain.Str(r.Body, "completed_at") != "" {
+					what = "as-laid"
+				}
+				add("C6", fmt.Sprintf("The %s mass (%.0f t) does not fit %g m² × %g cm (about %.0f t at 2.4 t/m³)", what, r.MassKg/1000, area, thick, want/1000),
+					"Check area, thickness and mass, and that every delivery is recorded.", map[string]any{"massKg": r.MassKg, "expectedKg": math.Round(want)})
+			}
+		}
+	}
+	if r.Type == domain.TypeLabTest {
+		test := domain.Str(r.Body, "test")
+		if w, ok := testSpecs[test]; ok {
+			if v := domain.Num(r.Body, "value"); v < w.lo || v > w.hi {
+				add("C6", fmt.Sprintf("%s result %g is outside %g–%g", domain.LabTests[test].Name, round(v), w.lo, w.hi),
+					"Re-test, or quarantine the tested lot.", map[string]any{"test": test, "value": v})
+			}
+		}
+		if domain.Str(r.Body, "result") == "fail" {
+			add("C6", domain.LabTests[test].Name+" failed", "Quarantine the tested lot and record the decision.", map[string]any{"test": test})
+		}
+	}
+}
+
+func round(x float64) float64 { return math.Round(x*100) / 100 }
+
+func signature(ctx context.Context, env Env, r *domain.Record, add addFn) error {
+	if r.Signature == nil {
+		add("C7", "Not signed", "Sign the record with the company key (the platform signs API and CSV submissions automatically).", nil)
+		return nil
+	}
+	if r.Signature.OrgID != r.OrgID {
+		add("C7", "Signed by another company", "Only the issuing company may sign its records.", map[string]any{"keyId": r.Signature.KeyID})
+		return nil
+	}
+	pub, ok, err := env.PublicKey(ctx, r.Signature.KeyID)
+	if err != nil {
+		return err
+	}
+	if !ok || signing.Verify(pub, r.ContentHash, r.Signature.Value) != nil {
+		add("C7", "Signature does not verify against the registered key",
+			"Re-sign the record; if the key was replaced, register the new key first.", map[string]any{"keyId": r.Signature.KeyID})
+	}
+	if rc := r.Receipt; rc != nil {
+		if rc.Signature.OrgID != r.Counterparty {
+			add("C7", "Receipt signed by a company other than the receiver", "Only the receiver may confirm a shipment.", nil)
+			return nil
+		}
+		pub, ok, err := env.PublicKey(ctx, rc.Signature.KeyID)
+		if err != nil {
+			return err
+		}
+		if !ok || signing.VerifyReceipt(pub, r.ContentHash, signing.ReceiptFacts{ReceivedAt: rc.ReceivedAt, MassKg: rc.MassKg, Decision: rc.Decision, Note: rc.Note}, rc.Signature.Value) != nil {
+			add("C7", "Receipt signature does not verify", "The receiver should confirm the shipment again.", map[string]any{"keyId": rc.Signature.KeyID})
+		}
+	}
+	return nil
+}
+
+// released checks that products leave a plant only after quality has released them.
+func released(ctx context.Context, env Env, r *domain.Record, inputs []*domain.Record, add addFn) error {
+	if r.Type != domain.TypeShipment {
+		return nil
+	}
+	for i, p := range inputs {
+		if p == nil || (p.Type != domain.TypeRecycledLot && p.Type != domain.TypeAdditiveBatch) {
+			continue
+		}
+		d, at, ok, err := env.Release(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !ok || at.After(r.OccurredAt):
+			add("C9", fmt.Sprintf("%s was shipped before quality released it", r.Inputs[i].ID),
+				"Record the quality release (or explain the urgent dispatch) before the receiver uses the lot.", map[string]any{"input": p.ID})
+		case d == domain.Quarantined:
+			add("C9", fmt.Sprintf("%s was shipped while quarantined", r.Inputs[i].ID),
+				"Recall the shipment, or release the lot with a reason.", map[string]any{"input": p.ID})
+		}
+	}
+	return nil
+}
+
+// Dosage window for dry-process polymer modifiers, % of mix mass: POLYMIX (Spain)
+// used 1 %, the RILEM interlaboratory study went to 1.5 %; below 0.2 % the additive
+// has no measurable effect.
+const (
+	DosageMin = 0.2
+	DosageMax = 1.5
+)
+
+func dosage(r *domain.Record, add addFn) {
+	if r.Type != domain.TypeAsphaltLot {
+		return
+	}
+	if d := domain.Num(r.Body, "dosage_pct_mix"); d < DosageMin || d > DosageMax {
+		add("C8", fmt.Sprintf("Dosage %.2f %% of mix is outside the %g–%g %% design window", d, DosageMin, DosageMax),
+			"Check the dosing scale and the mix design; record the lot as a trial if intended.", map[string]any{"dosage": d})
+	}
+}
+
+func warmInput(inputs []*domain.Record) bool {
+	for _, p := range inputs {
+		if p != nil && domain.Str(p.Body, "process") == "warm" {
+			return true
+		}
+	}
+	return false
+}
