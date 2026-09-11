@@ -77,3 +77,23 @@ func GridFactor(country string) float64 {
 }
 
 // ResidualFactor is the sensitivity scenario's electricity factor of a country:
+// the higher of its residual mix and its location-based factor, so the
+// conservative scenario is never less conservative than the default one (the
+// residual mix counts direct CO₂ only, the location-based factor life cycle).
+func ResidualFactor(country string) float64 {
+	return max(residualByCountry[country], GridFactor(country))
+}
+
+func countryOf(orgID string) string {
+	countryMu.RLock()
+	defer countryMu.RUnlock()
+	return orgCountry[orgID]
+}
+
+// gridFor is the electricity factor in country c under a scenario.
+func gridFor(c string, sc Scenario) float64 {
+	if sc.GridKey == "grid_residual" {
+		return ResidualFactor(c)
+	}
+	return GridFactor(c)
+}
