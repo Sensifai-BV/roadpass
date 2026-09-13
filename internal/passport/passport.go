@@ -549,3 +549,141 @@ func counted(g *store.Graph, root string, up bool) (*store.Graph, []domain.Recor
 		if keep[l.Parent] && keep[l.Child] {
 			out.Links = append(out.Links, l)
 		}
+	}
+	return out, dropped
+}
+
+// shareOf returns, for each node, the fraction of that node's mass that ended up
+// in the root: share(parent) += share(child) × link mass / parent mass. The root's
+// share is 1; share × mass is the kilograms a node contributed.
+func shareOf(root string, g *store.Graph) map[string]float64 {
+	mass := map[string]float64{}
+	for _, n := range g.Nodes {
+		mass[n.ID] = n.MassKg
+	}
+	parents := map[string][]domain.Link{}
+	children := map[string]int{}
+	for _, l := range g.Links {
+		parents[l.Child] = append(parents[l.Child], l)
+		children[l.Parent]++
+	}
+	// Kahn's order from the root downwards (towards origins).
+	share := map[string]float64{root: 1}
+	pending := map[string]int{}
+	for id, n := range children {
+		pending[id] = n
+	}
+	queue := []string{root}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, l := range parents[id] {
+			if pm := mass[l.Parent]; pm > 0 {
+				share[l.Parent] += share[id] * l.MassKg / pm
+			}
+			pending[l.Parent]--
+			if pending[l.Parent] == 0 {
+				queue = append(queue, l.Parent)
+			}
+		}
+	}
+	return share
+}
+
+// trust fills the verification block for the root record.
+func (b *Builder) trust(ctx context.Context, p *Passport, r *domain.Record, members bool, v *store.Viewer) error {
+	var ids []string
+	for _, sg := range []*domain.Signature{r.Signature, r.ActorSignature} {
+		if sg != nil {
+			ids = append(ids, sg.KeyID)
+		}
+	}
+	if rc := r.Receipt; rc != nil {
+		ids = append(ids, rc.Signature.KeyID)
+		if rc.ActorSignature != nil {
+			ids = append(ids, rc.ActorSignature.KeyID)
+		}
+	}
+	keys, err := b.St.SigningKeysByID(ctx, ids)
+	if err != nil {
+		return err
+	}
+	kmap := map[string]store.SigningKey{}
+	for _, k := range keys {
+		kmap[k.ID] = k
+	}
+	doc := r.HashDoc()
+	t := &Trust{HashDoc: &doc, ContentHash: r.ContentHash, Algorithm: "SHA-256 over RFC 8785 (JCS) canonical JSON"}
+	if s := r.Signature; s != nil {
+		k := kmap[s.KeyID]
+		t.Signature = &SigView{KeyID: s.KeyID, OrgID: s.OrgID, Algorithm: signing.Algorithm,
+			Value: base64.StdEncoding.EncodeToString(s.Value), PublicKey: base64.StdEncoding.EncodeToString(k.Public),
+			OnLedger: k.LedgerTxID != "", LedgerTxID: k.LedgerTxID, SignedAt: s.SignedAt,
+			Valid: signing.Verify(k.Public, r.ContentHash, s.Value) == nil}
+	}
+	if rc := r.Receipt; rc != nil {
+		k := kmap[rc.Signature.KeyID]
+		at := rc.ReceivedAt
+		t.Receipt = &SigView{KeyID: rc.Signature.KeyID, OrgID: rc.Signature.OrgID, Algorithm: signing.Algorithm,
+			Value: base64.StdEncoding.EncodeToString(rc.Signature.Value), PublicKey: base64.StdEncoding.EncodeToString(k.Public),
+			OnLedger: k.LedgerTxID != "", LedgerTxID: k.LedgerTxID, SignedAt: rc.ReceivedAt, ReceivedAt: &at, MassKg: rc.MassKg,
+			Decision: rc.Decision, Note: rc.Note,
+			Valid: signing.VerifyReceipt(k.Public, r.ContentHash, signing.ReceiptFacts{ReceivedAt: rc.ReceivedAt, MassKg: rc.MassKg, Decision: rc.Decision, Note: rc.Note}, rc.Signature.Value) == nil}
+	}
+	person := func(sig *domain.Signature, msgOK func(pub []byte) bool) *SigView {
+		if sig == nil {
+			return nil
+		}
+		k := kmap[sig.KeyID]
+		sv := &SigView{KeyID: sig.KeyID, OrgID: sig.OrgID, Algorithm: signing.Algorithm, Value: base64.StdEncoding.EncodeToString(sig.Value),
+			PublicKey: base64.StdEncoding.EncodeToString(k.Public), OnLedger: k.LedgerTxID != "", LedgerTxID: k.LedgerTxID,
+			SignedAt: sig.SignedAt, HolderID: k.UserID, Valid: len(k.Public) > 0 && msgOK(k.Public)}
+		if v != nil && v.OrgID == sig.OrgID && k.UserID != "" {
+			if u, err := b.St.UserByID(ctx, k.UserID); err == nil {
+				sv.HolderName = u.Name
+			}
+		}
+		return sv
+	}
+	t.ActorSignature = person(r.ActorSignature, func(pub []byte) bool { return signing.Verify(pub, r.ContentHash, r.ActorSignature.Value) == nil })
+	if rc := r.Receipt; rc != nil && rc.ActorSignature != nil {
+		facts := signing.ReceiptFacts{ReceivedAt: rc.ReceivedAt, MassKg: rc.MassKg, Decision: rc.Decision, Note: rc.Note}
+		t.ReceiptActor = person(rc.ActorSignature, func(pub []byte) bool {
+			return signing.VerifyReceipt(pub, r.ContentHash, facts, rc.ActorSignature.Value) == nil
+		})
+		if t.Receipt != nil {
+			t.ReceiptActor.Decision, t.ReceiptActor.Note, t.ReceiptActor.ReceivedAt, t.ReceiptActor.MassKg = t.Receipt.Decision, t.Receipt.Note, t.Receipt.ReceivedAt, t.Receipt.MassKg
+		}
+	}
+	if r.SealID != "" {
+		if s, err := b.St.GetSeal(ctx, r.SealID); err == nil {
+			t.Seal = &s
+			t.LeafIndex = r.LeafIndex
+			if s.Status == "sealed" {
+				if leaves, err := b.St.SealLeaves(ctx, r.SealID); err == nil && r.LeafIndex < len(leaves) {
+					if _, path, err := proof.InclusionProof(leaves, r.LeafIndex); err == nil {
+						t.Path = path
+					}
+				}
+			}
+		}
+	}
+	if vs, err := b.St.Versions(ctx, store.SystemViewer, r.ID); err == nil {
+		for _, x := range vs {
+			t.Versions = append(t.Versions, VersionView{Version: x.Version, ContentHash: x.ContentHash, PrevHash: x.PrevHash,
+				OccurredAt: x.OccurredAt, SealID: x.SealID})
+		}
+	}
+	if !members {
+		// The public layer shows the fingerprint and the seal, not the record body
+		// or the receiver's note.
+		t.HashDoc = nil // an empty document would hash to a different fingerprint
+		for _, rc := range []*SigView{t.Receipt, t.ReceiptActor} {
+			if rc != nil && rc.Note != "" {
+				rc.Note, rc.NoteHidden = "", true
+			}
+		}
+	}
+	p.Trust = t
+	return nil
+}
