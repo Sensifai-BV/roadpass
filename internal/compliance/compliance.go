@@ -234,3 +234,63 @@ func Report(ctx context.Context, d Deps, org domain.Org, period string) (*report
 				At: a.At, KeyID: a.KeyID, Signature: base64.StdEncoding.EncodeToString(a.Signature)}
 		}
 	}
+	return rep, nil
+}
+
+// SignState says whether a month's report is signed over its current figures:
+// "signed", "stale" (signed, but the data changed since) or "unsigned".
+func SignState(rep *report.Report, latest []store.Attestation, period string) (string, *store.Attestation) {
+	fp := string(report.SigningMessage(rep.Fingerprint()))
+	for i, a := range latest {
+		if a.RequirementID == ReportRequirement && a.Period == period {
+			if a.Message == fp {
+				return "signed", &latest[i]
+			}
+			return "stale", &latest[i]
+		}
+	}
+	return "unsigned", nil
+}
+
+// RegisterReport is a snapshot of the register, as of now.
+func RegisterReport(org domain.Org, reg Register, now time.Time) *report.Report {
+	title := "Regulatory register"
+	if reg.Jurisdiction != "" {
+		title = reg.Jurisdiction + " regulatory register"
+	}
+	rep := &report.Report{Title: title, Subtitle: "Requirements, their status and the evidence behind them", Org: org.Name,
+		Period: "As of " + now.UTC().Format("2 January 2006")}
+	if reg.Simulated {
+		rep.Notice = "Simulated demonstration data. Automatic checks are capped at “partly met” until operational records exist."
+	}
+	rep.KPIs = []report.KPI{
+		{Label: "Score", Value: fmt.Sprintf("%.0f %%", reg.Score)},
+		{Label: "Met", Value: fmt.Sprint(reg.Counts[Met])},
+		{Label: "Partly met", Value: fmt.Sprint(reg.Counts[Partial])},
+		{Label: "Gaps or statements needed", Value: fmt.Sprint(reg.Counts[Gap] + reg.Counts[Open])},
+	}
+	for _, rg := range reg.Regulations {
+		t := &report.Table{Name: rg.Name, Columns: []report.Column{{Title: "Ref"}, {Title: "Requirement", Weight: 2.4}, {Title: "Status"}, {Title: "Evidence", Weight: 3.4}, {Title: "Signed by", Weight: 1.4}}}
+		for _, it := range reg.Items {
+			if it.Regulation != rg.Key {
+				continue
+			}
+			by := ""
+			if a := it.Attestation; a != nil {
+				by = a.ByName + ", " + a.At.Format("2 Jan 2006")
+			}
+			t.Rows = append(t.Rows, []any{it.Ref, it.Title, statusName[it.Status], it.Detail, by})
+		}
+		if len(t.Rows) > 0 {
+			rep.Sections = append(rep.Sections, report.Section{Heading: rg.Name, Text: []string{rg.Act}, Table: t})
+		}
+	}
+	return rep
+}
+
+func orDefault(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
+}
