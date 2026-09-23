@@ -194,3 +194,53 @@ func retry(ctx context.Context, waits []time.Duration, send func(context.Context
 		if i < len(waits)-1 && onRetry != nil {
 			onRetry(i, err)
 		}
+	}
+	return err
+}
+
+// retryBackoff is the wait before attempts 1, 2 and 3 (tests shorten it).
+func (n *Notifier) retryBackoff() []time.Duration {
+	if len(n.Backoff) == 3 {
+		return n.Backoff
+	}
+	return []time.Duration{0, time.Second, 4 * time.Second}
+}
+
+// DeliverEvent sends an alert event to people (in-app, push, e-mail) and to
+// channels, and records each delivery on the event.
+func (n *Notifier) DeliverEvent(ctx context.Context, r Rule, ev *Event, audience, channelIDs []string) {
+	var ds []Delivery
+	in, pushed := n.Notify(ctx, r.OrgID, audience, Notification{Kind: "alert", Severity: ev.Severity, Title: ev.Title, Body: ev.Body,
+		Link: ev.Link, EventID: &ev.ID})
+	ds = append(ds, Delivery{Channel: "in-app", Type: "in-app", OK: true, To: in})
+	if pushed > 0 {
+		ds = append(ds, Delivery{Channel: "browser", Type: "push", OK: true, To: pushed})
+	}
+	data := map[string]any{"rule": r.Name, "ruleId": r.ID, "key": ev.Key, "eventId": ev.ID, "orgId": r.OrgID}
+	if ev.Value != nil && r.Kind != KindFinding && r.Kind != KindRejected {
+		data["value"] = *ev.Value // a threshold reading; findings and rejections have none
+	}
+	for k, v := range ev.Detail { // what the rule saw: record, site, shipment…
+		if _, taken := data[k]; !taken {
+			data[k] = v
+		}
+	}
+	m := Message{ID: fmt.Sprintf("evt_%d", ev.ID), Subject: ev.Title, Text: ev.Body, Severity: ev.Severity, State: ev.State, Link: n.link(ev.Link), Data: data}
+	for _, id := range channelIDs {
+		c, err := n.DB.Channel(ctx, r.OrgID, id)
+		if err != nil {
+			ds = append(ds, Delivery{Channel: id, OK: false, Error: "channel not found"})
+			continue
+		}
+		err = n.SendChannel(ctx, c, m)
+		d := Delivery{Channel: c.Name, Type: c.Type, OK: err == nil}
+		if err != nil {
+			d.Error = err.Error()
+		}
+		ds = append(ds, d)
+	}
+	ev.Deliveries = ds
+	if err := n.DB.SetDeliveries(ctx, ev.ID, ds); err != nil {
+		slog.Error("alerts: record deliveries", "event", ev.ID, "err", err)
+	}
+}
