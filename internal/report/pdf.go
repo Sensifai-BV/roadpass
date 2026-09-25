@@ -339,3 +339,89 @@ func (r *Report) pdfChart(p *fpdf.Fpdf, c *Chart, margin, inner float64) {
 	}
 	p.SetDrawColor(line.r, line.g, line.b)
 	p.SetLineWidth(0.15)
+	for i := 0; i <= 4; i++ {
+		y := y0 + h - h*float64(i)/4
+		p.Line(margin+14, y, margin+inner, y)
+		p.SetFont("go", "", 6)
+		p.SetTextColor(muted.r, muted.g, muted.b)
+		p.SetXY(margin, y-2)
+		p.CellFormat(12, 4, fmtShort(maxV*float64(i)/4), "", 0, "R", false, 0, "")
+	}
+	n := len(c.Values)
+	plotW := inner - 16
+	step := plotW / float64(n)
+	p.SetFillColor(accent.r, accent.g, accent.b)
+	p.SetDrawColor(accent.r, accent.g, accent.b)
+	if c.Kind == "line" && n > 1 {
+		p.SetLineWidth(0.6)
+		for i := 1; i < n; i++ {
+			x1, x2 := margin+16+step*(float64(i)-0.5), margin+16+step*(float64(i)+0.5)
+			p.Line(x1, y0+h-h*c.Values[i-1]/maxV, x2, y0+h-h*c.Values[i]/maxV)
+		}
+	} else {
+		bw := math.Max(0.6, step*0.7)
+		for i, v := range c.Values {
+			bh := h * v / maxV
+			p.Rect(margin+16+step*float64(i)+(step-bw)/2, y0+h-bh, bw, bh, "F")
+		}
+	}
+	// a few labels along the axis
+	p.SetFont("go", "", 6)
+	p.SetTextColor(muted.r, muted.g, muted.b)
+	every := max(1, n/8)
+	for i := 0; i < n; i += every {
+		if i < len(c.Labels) {
+			p.SetXY(margin+16+step*float64(i)-6, y0+h+1)
+			p.CellFormat(step*float64(every)+12, 3.5, pdfText.Replace(c.Labels[i]), "", 0, "L", false, 0, "")
+		}
+	}
+	p.SetY(y0 + h + 7)
+}
+
+func weight(c Column) float64 {
+	if c.Weight > 0 {
+		return c.Weight
+	}
+	return 1
+}
+
+// clipW shortens s to fit width w in the current font.
+func clipW(p *fpdf.Fpdf, s string, w float64) string {
+	if p.GetStringWidth(s) <= w {
+		return s
+	}
+	rs := []rune(s)
+	for len(rs) > 1 && p.GetStringWidth(string(rs)+"...") > w {
+		rs = rs[:len(rs)-1]
+	}
+	return string(rs) + "..."
+}
+
+func clip(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+func fmtShort(v float64) string {
+	switch a := math.Abs(v); {
+	case a >= 1e6:
+		return fmt.Sprintf("%.1fM", v/1e6)
+	case a >= 1e3:
+		return fmt.Sprintf("%.0fk", v/1e3)
+	case a >= 10:
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%.1f", v)
+}
+
+func nonEmpty(xs ...string) []string {
+	var out []string
+	for _, x := range xs {
+		if x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
