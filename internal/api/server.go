@@ -206,3 +206,55 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(buf.Bytes())
 }
 
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
+	writeProblemErrs(w, r, status, title, detail, nil)
+}
+
+func writeProblemErrs(w http.ResponseWriter, r *http.Request, status int, title, detail string, errs any) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(Problem{Type: "about:blank", Title: title, Status: status, Detail: detail,
+		Instance: fmt.Sprint(r.Context().Value(keyRequestID)), Errors: errs})
+}
+
+// fail maps an error to a response; unknown errors are logged and hidden.
+func fail(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeProblem(w, r, http.StatusNotFound, "Not found", "")
+	case errors.Is(err, store.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "Forbidden", "You do not have access to this.")
+	case errors.Is(err, store.ErrConflict):
+		writeProblem(w, r, http.StatusConflict, "Conflict", err.Error())
+	case errors.Is(err, ingest.ErrSuspended):
+		writeProblem(w, r, http.StatusForbidden, "Organisation suspended", err.Error())
+	case errors.Is(err, ingest.ErrReadOnly):
+		writeProblem(w, r, http.StatusForbidden, "Read-only organisation", err.Error())
+	case errors.Is(err, ingest.ErrDuty):
+		writeProblem(w, r, http.StatusForbidden, "Missing duty", err.Error())
+	case errors.Is(err, ledger.ErrOffline):
+		writeProblem(w, r, http.StatusServiceUnavailable, "Ledger offline", "The blockchain network is not reachable right now.")
+	case errors.Is(err, context.Canceled):
+		// client went away
+	default:
+		slog.Error("request failed", "err", err, "path", r.URL.Path, "req", r.Context().Value(keyRequestID))
+		writeProblem(w, r, http.StatusInternalServerError, "Internal error", "Something went wrong on our side. The request id helps us find it.")
+	}
+}
+
+// decode reads a JSON body (≤ max bytes) into v.
+func decode(w http.ResponseWriter, r *http.Request, v any, max int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeProblem(w, r, http.StatusRequestEntityTooLarge, "Request too large", fmt.Sprintf("The limit is %d bytes.", max))
+			return false
+		}
+		writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", err.Error())
+		return false
+	}
+	return true
+}
