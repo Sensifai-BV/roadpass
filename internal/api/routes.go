@@ -194,3 +194,53 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/ledger/orgs", s.with(viewer, s.ledgerOrgs))
 	mux.HandleFunc("GET /api/v1/ledger/orgs/{id}/seals", s.with(viewer, s.ledgerOrgSeals))
 	mux.HandleFunc("GET /api/v1/ledger/blocks", s.with(guard{}, s.ledgerBlocks))
+	mux.HandleFunc("GET /api/v1/ledger/blocks/{n}", s.with(guard{}, s.ledgerBlock))
+	mux.HandleFunc("GET /api/v1/ledger/signers", s.with(viewer, s.ledgerSigners))
+	mux.HandleFunc("POST /api/v1/ledger/verify", s.verifyAnything)
+
+	// exports
+	mux.HandleFunc("GET /api/v1/exports/greta.csv", s.with(viewer, s.exportGRETA))
+
+	// operator
+	// platform console (SaaS manager: the operator's admins)
+	pm := guard{operator: true, role: "admin"}
+	mux.HandleFunc("GET /api/v1/platform/overview", s.with(pm, s.platformOverview))
+	mux.HandleFunc("GET /api/v1/platform/orgs", s.with(pm, s.platformOrgs))
+	mux.HandleFunc("POST /api/v1/platform/orgs", s.with(pm, s.platformCreateOrg))
+	mux.HandleFunc("PUT /api/v1/platform/orgs/{id}", s.with(pm, s.platformUpdateOrg))
+	mux.HandleFunc("POST /api/v1/platform/orgs/{id}/status", s.with(pm, s.platformOrgStatus))
+	mux.HandleFunc("POST /api/v1/platform/orgs/{id}/invitations", s.with(pm, s.platformInvite))
+	mux.HandleFunc("PUT /api/v1/platform/orgs/{id}/subscription", s.with(pm, s.platformSetSubscription))
+	mux.HandleFunc("GET /api/v1/platform/users", s.with(pm, s.platformUsers))
+	mux.HandleFunc("POST /api/v1/platform/users/{id}/status", s.with(pm, s.platformUserStatus))
+	mux.HandleFunc("GET /api/v1/platform/contact", s.with(pm, s.platformContact))
+	mux.HandleFunc("POST /api/v1/platform/contact/{id}/handled", s.with(pm, s.platformContactHandled))
+	mux.HandleFunc("GET /api/v1/platform/mail", s.with(pm, s.platformMail))
+	mux.HandleFunc("PUT /api/v1/platform/mail", s.with(pm, s.platformSaveMail))
+	mux.HandleFunc("DELETE /api/v1/platform/mail", s.with(pm, s.platformDeleteMail))
+	mux.HandleFunc("POST /api/v1/platform/mail/test", s.with(pm, s.platformTestMail))
+	mux.HandleFunc("GET /api/v1/platform/plans", s.with(pm, s.platformPlans))
+	mux.HandleFunc("PUT /api/v1/platform/plans/{id}", s.with(pm, s.platformUpdatePlan))
+	mux.HandleFunc("GET /api/v1/platform/invoices", s.with(pm, s.platformInvoices))
+	mux.HandleFunc("POST /api/v1/platform/invoices/generate", s.with(pm, s.platformGenerateInvoices))
+	mux.HandleFunc("POST /api/v1/platform/invoices/{id}/status", s.with(pm, s.platformInvoiceStatus))
+	mux.HandleFunc("GET /api/v1/org/billing", s.with(admin, s.orgBilling))
+	mux.HandleFunc("GET /api/v1/org/team", s.with(admin, s.team))
+	mux.HandleFunc("POST /api/v1/work/assign", s.with(admin, s.assign))
+	mux.HandleFunc("GET /api/v1/audit", s.with(guard{role: "admin"}, s.auditLog))
+
+	// calendar and planning
+	s.planRoutes(mux)
+
+	// live
+	mux.HandleFunc("GET /api/v1/events", s.with(guard{}, s.events))
+
+	// NGSI-LD
+	s.ngsiRoutes(mux)
+
+	// docs
+	mux.HandleFunc("GET /api/openapi.json", s.openapi)
+
+	// dashboard
+	mux.Handle("/", s.spa())
+}
