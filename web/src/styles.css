@@ -247,3 +247,66 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
   border-radius: 16px;
 }
 
+/* journey track (Overview) */
+@keyframes jt-bar { from { transform: scaleX(0) } to { transform: scaleX(1) } }
+@keyframes jt-pop { from { transform: scale(.4); opacity: 0 } 70% { transform: scale(1.12); opacity: 1 } to { transform: scale(1); opacity: 1 } }
+.jt-pop { animation: jt-pop .35s cubic-bezier(.3,.7,.3,1.3) both; }
+.jt-bar { transform-origin: left; animation: jt-bar .9s cubic-bezier(.45,.05,.25,1) both; }
+/* A pulse that runs along one step's rail, then waits while it crosses the others. */
+@keyframes jt-run { 0% { left: -30% } 18% { left: 100% } 100% { left: 100% } }
+.jt-run { position: absolute; top: 0; height: 100%; width: 30%; left: -30%; border-radius: 99px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.9), transparent); mix-blend-mode: soft-light;
+  animation: jt-run 3.3s linear infinite; }
+.live-dot { width: 7px; height: 7px; border-radius: 99px; background: var(--good); animation: pulse-dot 2s infinite; }
+
+.scroll-thin { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+
+/* charts */
+.viz text { fill: var(--muted); font-size: 11px; font-family: var(--font-sans); }
+.viz .grid line { stroke: var(--grid); }
+.viz .axis-line { stroke: var(--line-strong); }
+.tooltip {
+  pointer-events: none; position: absolute; z-index: 30; min-width: 140px;
+  background: var(--bg-elevated); color: var(--text); border-radius: 12px; padding: 9px 11px;
+  box-shadow: var(--shadow-pop); font-size: 12px; backdrop-filter: blur(20px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .jt-run { display: none; }
+}
+
+@layer components {
+/* delta pill (top-right of a metric card) */
+.pill { display: inline-flex; align-items: center; gap: 2px; height: 20px; padding: 0 7px; border-radius: 6px; font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.pill-up { background: var(--good-soft); color: var(--good-ink); }
+.pill-down { background: var(--critical-soft); color: var(--critical-ink); }
+.pill-flat { background: var(--surface-3); color: var(--text-2); }
+}
+
+/* Street maps follow the theme: dark mode dims and inverts the light tiles. */
+.rp-street { background: var(--surface-2); z-index: 0; }
+.rp-street .leaflet-tooltip { font: 500 12px/1.35 var(--font-sans, inherit); border-radius: 8px; }
+:root[data-theme="dark"] .rp-street .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); }
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .rp-street .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); }
+}
+.rp-pin { width: 22px; height: 22px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: var(--accent); border: 2.5px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.35); }
+
+/* marketing pages (landing, contact) */
+.mk-reveal { opacity: 0; transform: translateY(14px); transition: opacity .6s cubic-bezier(.2,.7,.2,1), transform .6s cubic-bezier(.2,.7,.2,1); }
+.mk-reveal.mk-in { opacity: 1; transform: none; }
+.mk-section { scroll-margin-top: 72px; }
+.mk-h2 { font-size: clamp(28px, 3.6vw, 44px); font-weight: 700; letter-spacing: -0.035em; line-height: 1.05; }
+.mk-lead { font-size: clamp(15px, 1.4vw, 18px); line-height: 1.55; color: var(--text-2); }
+.mk-card { background: var(--surface); border-radius: 20px; box-shadow: var(--shadow-1); transition: transform .25s cubic-bezier(.2,.7,.2,1), box-shadow .25s; }
+.mk-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-2); }
+.mk-glow { background: radial-gradient(60% 60% at 50% 0%, color-mix(in srgb, var(--brand) 22%, transparent), transparent 70%); }
+@keyframes mk-float { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-8px) } }
+.mk-float { animation: mk-float 7s ease-in-out infinite; }
+@keyframes mk-dash { to { stroke-dashoffset: -24 } }
+.mk-dash { stroke-dasharray: 6 6; animation: mk-dash 1.2s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .mk-reveal { opacity: 1; transform: none; } .mk-float, .mk-dash { animation: none; } }
+/* A block that stays dark in both themes (code windows, the closing band). */
+.mk-dark { --bg: #0b0b0c; --surface: #18181a; --surface-2: #202022; --surface-3: #2a2a2d; --line: rgba(255,255,255,.09); --line-strong: rgba(255,255,255,.16);
+  --text: #f5f5f7; --text-2: #c7c7cc; --muted: #8e8e93; --hover: rgba(255,255,255,.07); color: var(--text); }
