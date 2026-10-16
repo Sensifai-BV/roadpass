@@ -165,3 +165,45 @@ export function useLive(enabled: boolean): "live" | "connecting" | "offline" {
       es.onerror = () => setState(document.hidden ? "connecting" : "offline");
       for (const kind of ["records", "seal", "finding", "org", "plans"]) es.addEventListener(kind, refresh);
       // A notification for this person: refresh the bell, and the alert lists an alert may have changed.
+      es.addEventListener("notification", () => {
+        for (const k of ["notifications", "alerts-active", "alert-history", "alert-stats"]) void qc.invalidateQueries({ queryKey: [k] });
+      });
+    };
+    const onVis = () => {
+      if (document.hidden) {
+        es?.close();
+        es = null;
+        setState("connecting");
+      } else if (!es) {
+        open();
+        refresh();
+      }
+    };
+    open();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.clearTimeout(timer);
+      es?.close();
+    };
+  }, [enabled, qc]);
+  return state;
+}
+
+/** True while the page renders dark: the viewer's toggle if set, otherwise the OS. Updates live. */
+export function useIsDark(): boolean {
+  const read = () => {
+    const t = document.documentElement.dataset.theme;
+    return t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  };
+  const [dark, setDark] = useState(read);
+  useEffect(() => {
+    const on = () => setDark(read());
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    mq.addEventListener("change", on);
+    const mo = new MutationObserver(on);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => { mq.removeEventListener("change", on); mo.disconnect(); };
+  }, []);
+  return dark;
+}
