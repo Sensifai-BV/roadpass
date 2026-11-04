@@ -1,0 +1,262 @@
+# ROADPASS full stack for local development, demos and end-to-end tests (OrbStack
+# or any Docker engine).
+#
+#   make stack          build and start everything, seed, seal
+#   make e2e            run the Playwright suite against it
+#   make debug          also start Hyperledger Explorer on http://localhost:8091
+#
+# State lives in named volumes; `make stack-clean` removes them.
+name: roadpass
+
+x-app: &app
+  image: roadpass:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    args:
+      VERSION: ${VERSION:-local}
+  environment: &app-env
+    ENVIRONMENT: development
+    DATABASE_URL: postgres://roadpass:${POSTGRES_PASSWORD:-roadpass}@postgres:5432/roadpass?sslmode=disable
+    CLICKHOUSE_URL: clickhouse://roadpass:${CLICKHOUSE_PASSWORD:-roadpass}@clickhouse:9000/roadpass
+    REDIS_URL: redis://redis:6379/0
+    SIGNING_MASTER_KEY: ${SIGNING_MASTER_KEY:-e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0}
+    FABRIC_DIR: /fabric
+    VAULT_ADDR: http://openbao:8200
+    VAULT_TOKEN_FILE: /vault-token/roadpass.token
+    # Notifications. Local stacks send mail to Mailpit (http://localhost:8025);
+    # webhooks may call private addresses here only.
+    SMTP_HOST: mailpit
+    SMTP_PORT: "1025"
+    SMTP_TLS: none
+    SMTP_FROM: "ROADPASS <alerts@roadpass.local>"
+    ALERTS_ALLOW_PRIVATE: "1"
+    ALERTS_INTERVAL: 10s
+    FABRIC_PEER: fabric:7051
+    PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+    # Cloudflare Turnstile on the public contact form; unset = no challenge. Cloudflare publishes test keys
+    # (site 1x00000000000000000000AA, secret 1x0000000000000000000000000000000AA) that always pass.
+    TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+    TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+    TURNSTILE_VERIFY_URL: ${TURNSTILE_VERIFY_URL:-https://challenges.cloudflare.com/turnstile/v0/siteverify}
+    DEMO_MODE: "1"
+    DEMO_TENANT: ${DEMO_TENANT:-0}
+    DEMO_TENANT_PASSWORD: ${DEMO_TENANT_PASSWORD:-roadpass-demo-2026}
+    SEAL_INTERVAL: 5s
+    LOG_FORMAT: json
+  volumes:
+    - fabric-crypto:/fabric/crypto:ro
+    - vault-token:/vault-token:ro
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: roadpass
+      POSTGRES_USER: roadpass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-roadpass}
+    command: ["postgres", "-c", "shared_buffers=512MB", "-c", "work_mem=32MB", "-c", "max_wal_size=4GB"]
+    volumes: [pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roadpass -d roadpass"]
+      interval: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.9
+    environment:
+      CLICKHOUSE_DB: roadpass
+      CLICKHOUSE_USER: roadpass
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-roadpass}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    volumes: [ch:/var/lib/clickhouse]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    volumes: [redis:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 30
+
+  # Signing keys: OpenBao Transit. Private keys are created non-exportable and
+  # never leave it; ROADPASS holds a token that can only create, rotate and sign.
+  openbao:
+    image: quay.io/openbao/openbao:2.5.1
+    command: ["server", "-config=/openbao/config/config.hcl"]
+    volumes:
+      - ./openbao/config.hcl:/openbao/config/config.hcl:ro
+      - openbao-data:/openbao/file
+    cap_add: [IPC_LOCK]
+    healthcheck:
+      # 200 active, 501 not initialised, 503 sealed: the server is up either way.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/seal-status"]
+      interval: 3s
+      retries: 30
+
+  # Local/E2E only: catches every e-mail the platform sends.
+  mailpit:
+    image: axllent/mailpit:v1.28.0
+    ports: ["127.0.0.1:${MAILPIT_PORT:-8025}:8025"]
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+
+  # Local/E2E only: initialise, unseal, enable Transit, issue the app token.
+  openbao-init:
+    image: quay.io/openbao/openbao:2.5.1
+    entrypoint: ["/bin/sh", "/init.sh"]
+    environment:
+      BAO_ADDR: http://openbao:8200
+    volumes:
+      - ./openbao/init.sh:/init.sh:ro
+      - openbao-init:/state
+      - vault-token:/token
+    depends_on:
+      openbao: { condition: service_healthy }
+
+  fabric:
+    image: roadpass-fabric:local
+    build:
+      context: ..
+      dockerfile: deploy/fabric/Dockerfile
+    volumes:
+      - fabric-data:/roadpass/fabric/data
+      - fabric-run:/roadpass/fabric/.run
+      - fabric-crypto:/roadpass/fabric/crypto
+    ports:
+      # Hyperledger Explorer (profile "debug") shares this container's network.
+      - "127.0.0.1:${EXPLORER_PORT:-8091}:8080"
+    stop_grace_period: 20s
+
+  seed:
+    <<: *app
+    command: ["seed", "-reset", "-scale", "${SEED_SCALE:-1}"]
+    profiles: [seed]
+    depends_on:
+      openbao-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  app:
+    <<: *app
+    command: ["serve"]
+    ports: ["127.0.0.1:${HTTP_PORT:-8080}:8080"]
+    depends_on:
+      openbao-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      fabric: { condition: service_started }
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    healthcheck:
+      test: ["CMD", "/roadpass", "health", "-worker"]
+      interval: 15s
+      start_period: 30s
+    environment:
+      <<: *app-env
+      WORKER_NAME: worker-1
+    depends_on:
+      openbao-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      fabric: { condition: service_healthy }
+
+  # ---------------------------------------------------------------- debug: Hyperledger Explorer
+  explorer-config:
+    image: alpine:3.22
+    profiles: [debug]
+    entrypoint: ["/bin/sh", "/make-config.sh"]
+    volumes:
+      - ./explorer/make-config.sh:/make-config.sh:ro
+      - fabric-crypto:/crypto:ro
+      - explorer-state:/state
+    depends_on:
+      fabric: { condition: service_healthy }
+
+  explorer-db:
+    image: ghcr.io/hyperledger-labs/explorer-db@sha256:797c605e130f9f8b197bc717dadcf8d19a09fc9ec5f8a5273121e3d5540ebdaf   # explorer-db 2.0.0
+    profiles: [debug]
+    environment:
+      DATABASE_DATABASE: fabricexplorer
+      DATABASE_USERNAME: hppoc
+      DATABASE_PASSWORD: ${EXPLORER_DB_PASSWORD:-roadpass-debug}
+    volumes: [explorer-pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -q -U postgres"]
+      interval: 3s
+      retries: 30
+
+  explorer:
+    image: ghcr.io/hyperledger-labs/explorer@sha256:a52b1439dee979f2f5b64eb45c68ba4615ea3293d7c7778eff5b300197a925c4   # explorer 2.0.0
+    profiles: [debug]
+    # Same network namespace as the peers: Fabric discovery advertises 127.0.0.1
+    # endpoints, which resolve correctly only from inside that namespace.
+    network_mode: "service:fabric"
+    environment:
+      PORT: "8080"
+      DATABASE_HOST: explorer-db
+      DATABASE_PORT: "5432"
+      DATABASE_DATABASE: fabricexplorer
+      DATABASE_USERNAME: hppoc
+      DATABASE_PASSWD: ${EXPLORER_DB_PASSWORD:-roadpass-debug}
+      LOG_CONSOLE_STDOUT: "true"
+      DISCOVERY_AS_LOCALHOST: "true"
+    volumes:
+      - explorer-state:/opt/explorer/app/platform/fabric/state:ro
+      - fabric-crypto:/crypto:ro
+      - explorer-wallet:/opt/explorer/wallet
+    entrypoint: ["/bin/sh", "-c", "cp /opt/explorer/app/platform/fabric/state/config.json /opt/explorer/app/platform/fabric/config.json && rm -rf /opt/explorer/app/platform/fabric/connection-profile && cp -r /opt/explorer/app/platform/fabric/state/connection-profile /opt/explorer/app/platform/fabric/connection-profile && exec npm run app-start"]
+    depends_on:
+      explorer-config: { condition: service_completed_successfully }
+      explorer-db: { condition: service_healthy }
+
+  # ---------------------------------------------------------------- e2e: Playwright
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.64.1-noble
+    profiles: [e2e]
+    working_dir: /e2e
+    # Share the app's network namespace so the browser reaches it at localhost: a
+    # secure context (WebCrypto, as over HTTPS in production) with no HSTS-preload
+    # surprises ("app" falls under Chromium's preloaded .app TLD).
+    network_mode: "service:app"
+    environment:
+      BASE_URL: http://localhost:8080
+      CI: "1"
+    volumes:
+      - ../e2e:/e2e
+      - e2e-node:/e2e/node_modules
+    command: ["bash", "-lc", "npm ci --no-audit --no-fund && npx playwright test"]
+    depends_on:
+      app: { condition: service_healthy }
+
+volumes:
+  openbao-data:
+  openbao-init:
+  vault-token:
+  pg:
+  ch:
+  redis:
+  fabric-data:
+  fabric-run:
+  fabric-crypto:
+  explorer-state:
+  explorer-pg:
+  explorer-wallet:
+  e2e-node:
