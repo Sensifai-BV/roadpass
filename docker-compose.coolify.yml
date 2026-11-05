@@ -177,3 +177,18 @@ services:
       openbao-init: { condition: service_completed_successfully }
       rp-postgres: { condition: service_healthy }
       rp-redis: { condition: service_healthy }
+      fabric: { condition: service_healthy }
+
+networks:
+  coolify:
+    external: true
+
+volumes:
+  pg:
+  redis:
+  openbao-data:
+  openbao-init:
+  vault-token:
+  fabric-data:
+  fabric-run:
+  fabric-crypto:
