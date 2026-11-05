@@ -33,3 +33,5 @@ datasets/out_plasmix/
 .idea/
 __pycache__/
 *.pyc
+docs/
+reference/
